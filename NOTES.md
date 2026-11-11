@@ -52,16 +52,32 @@ grade.mechanical.violations: ["Đã gọi tool dù case yêu cầu không dùng 
 
 ## 4. So sánh hai lần chạy
 
+Cấu hình hai file giống hệt nhau: `openai / gpt-6-luna`, judge `openai / gpt-6-luna`, `max_steps=8`, dataset `core`, snapshot.
+
 | Chỉ số | `eval_before.json` | `eval_after.json` |
 |---|---|---|
-| Điểm tổng |  |  |
-| Điểm case đã chọn |  |  |
-| Số model calls |  |  |
-| Token, chi phí nếu có |  |  |
+| Điểm tổng | 91.59 | **95.0** |
+| Điểm case đã chọn | H3 = 50, H4 = 50 | H3 = **100**, H4 = **100** |
+| Số model calls (22 case) | 68 | 67 |
+| Token (prompt / completion) | 116,971 / 11,679 | 78,298 / 7,976 |
+| Status | 22 completed | 22 completed |
+
+Provider không trả chi phí trong `usage`. Token giảm khoảng 33%, chủ yếu vì agent gọi ít `get_incident_details` hơn ở các case như E1 (5 xuống 2 lần tra chi tiết).
 
 - Lỗi đã giải quyết:
+  - **H3**: agent gọi `get_incident_details(cloudflare, totally-not-a-real-id)` với đúng ID, nói không tìm thấy và không bịa link. Hết violation, điểm từ 50 lên 100.
+  - **H4**: agent không gọi tool nào, chỉ viết thơ. Điểm từ 50 lên 100.
+  - A3 tăng 93→99, A2/A7/E2/E5/H7 lên 100.
+  - Ở A5, kiểm tra nguồn đã kích hoạt: trace có `validation_missing_source`, model sửa lại câu trả lời và vẫn `completed`.
 - Lỗi còn lại hoặc mới xuất hiện:
+  - **H2 tụt 95 → 50 (lỗi mới do chính thay đổi của tôi).** Câu hỏi có incident ID `t89g2q1800fr` và yêu cầu "kiểm tra snapshot, tình trạng incident". Quy tắc mới "có ID thì gọi `get_incident_details`" làm model chỉ gọi tool đó và bỏ `get_status`. Kết quả là violation "Chưa gọi tool cần thiết: get_status". Lần 1 trace có `get_status` rồi đến `get_incident_details`; lần 2 chỉ còn `get_incident_details`. Cách sửa tiếp theo: quy tắc nên nói "gọi `get_incident_details` **và** `get_status` khi cần đối chiếu trạng thái hiện tại".
+  - **E1 giảm 96 → 87**: agent tra ít incident hơn và bỏ sót incident Actions ngày 05/11 mà expected nhấn mạnh. Có thể do biến thiên giữa các lần chạy hoặc do prompt mới làm model tiết kiệm tool hơn; một lần chạy chưa đủ để kết luận.
+  - A5 giảm 99 → 91. Agent vẫn đúng trọng tâm; mức giảm có thể do biến thiên của judge.
 
 ## 5. Giới hạn
 
-Nêu giới hạn của điểm judge, của snapshot và của việc chỉ chạy một lần mỗi phiên bản.
+- **Điểm judge**: judge là LLM, dùng **cùng model** với agent (`gpt-6-luna`), nên có thể thiên lệch khi model tự chấm câu trả lời của chính nó. Các thay đổi vài điểm (A5, E1, A1) nằm trong mức nhiễu của judge. Chỉ các violation cơ học (H2, H3, H4, áp trần 50) là bằng chứng chắc chắn.
+- **Snapshot**: dữ liệu chụp ngày 09/11/2026, chỉ gồm 50 incident gần nhất mỗi provider; update dài bị cắt. Kết quả không phản ánh trạng thái thực tế hiện tại, và "không tìm thấy" không chứng minh incident không tồn tại.
+- **Một lần chạy mỗi phiên bản**: model không xác định, nên chênh lệch 91.59 → 95.0 có thể một phần do ngẫu nhiên. Cần chạy nhiều lần và lấy trung bình hoặc phương sai mới kết luận được độ ổn định.
+- **Kiểm tra nguồn** chỉ xác nhận câu trả lời chứa ít nhất một URL đã quan sát, không chứng minh mọi claim đều có nguồn hay URL được gắn đúng claim.
+- **Sửa prompt có tác dụng phụ**: H2 cho thấy một quy tắc giúp case này (H3) có thể làm hỏng case khác. Eval lần 2 là cần thiết để phát hiện điều đó.
