@@ -56,21 +56,59 @@ def run_agent(question, provider, tools, max_steps=6):
         {'role': 'user', 'content': question},
     ]
     trace, usage = [], []
+
+    def done(status, answer='', error=None):
+        out = {'status': status, 'answer': answer, 'trace': trace, 'usage': usage}
+        if error:
+            out['error'] = error
+        trace.append({'event': 'end', 'status': status, **({'error': error} if error else {})})
+        return out
+
     for step in range(1, max_steps + 1):
-        resp = provider.complete(messages, SCHEMAS)
-        usage.append(resp.get('usage'))
+        # Lỗi provider (HTTP, mạng, response sai format) kết thúc run.
+        try:
+            resp = provider.complete(messages, SCHEMAS)
+        except Exception as exc:  # noqa: BLE001
+            msg = f'{type(exc).__name__}: {exc}'
+            trace.append({'event': 'provider_error', 'step': step, 'error': msg})
+            return done('error', error=msg)
+        usage.append(resp.get('usage') or {})
         calls = resp.get('calls') or []
         finish = resp.get('finish')
-        trace.append({'event': 'model', 'step': step, 'finish': finish, 'calls': len(calls)})
-        messages.append(resp['message'])  # giữ nguyên assistant message
+        message = resp.get('message') or {}
+        trace.append({'event': 'model', 'step': step, 'finish': finish,
+                      'tool_calls': [c.get('name') for c in calls]})
+
+        if finish == 'length':
+            return done('error', message.get('content') or '', 'MODEL_OUTPUT_TRUNCATED')
+
+        messages.append(message)  # giữ nguyên assistant message
+
         if not calls:
-            content = resp['message'].get('content') or ''
-            return {'status': 'completed', 'answer': content, 'trace': trace, 'usage': usage}
+            if finish not in ('stop', 'end_turn', None):
+                return done('error', message.get('content') or '', f'UNEXPECTED_FINISH: {finish}')
+            return done('completed', message.get('content') or '')
+
+        # Lỗi tool là observation: trả lại cho model, không kết thúc run.
         for call in calls:
-            args = json.loads(call['arguments'] or '{}')
-            result = tools.execute(call['name'], args)
-            trace.append({'event': 'tool', 'step': step, 'name': call['name'],
+            name, raw = call.get('name'), call.get('arguments')
+            try:
+                args = json.loads(raw) if raw else {}
+                if not isinstance(args, dict):
+                    raise ValueError('arguments phải là JSON object')
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                args = raw
+                result = {'ok': False, 'error': 'INVALID_ARGUMENTS',
+                          'message': f'Không parse được arguments JSON: {exc}'}
+            else:
+                try:
+                    result = tools.execute(name, args)
+                except Exception as exc:  # noqa: BLE001
+                    result = {'ok': False, 'error': 'TOOL_EXCEPTION',
+                              'message': f'{type(exc).__name__}: {exc}'}
+            trace.append({'event': 'tool', 'step': step, 'name': name,
                           'arguments': args, 'result': result})
-            messages.append({'role': 'tool', 'tool_call_id': call['id'],
+            messages.append({'role': 'tool', 'tool_call_id': call.get('id'),
                              'content': json.dumps(result, ensure_ascii=False)})
-    return {'status': 'max_steps', 'answer': '', 'trace': trace, 'usage': usage}
+
+    return done('max_steps', error=f'Hết {max_steps} lượt gọi model')
